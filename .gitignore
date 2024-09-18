@@ -1,3 +1,6 @@
 # Ignore all files in the build directory
 .env
 image_folder/
+pdf_folder/
+fonts/
+

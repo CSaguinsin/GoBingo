@@ -1,11 +1,14 @@
 import os
 import logging
-from dotenv import load_dotenv  # For environment variables
-import requests  # For AI model API requests
-from fpdf import FPDF  # For PDF creation
-from PIL import Image  # For image manipulation and legit PDF generation
+from dotenv import load_dotenv
+import requests
+from fpdf import FPDF
+from PIL import Image
+import pytesseract
 
-load_dotenv()  # Load environment variables from .env file
+# Set the path to the Tesseract executable
+pytesseract.pytesseract.tesseract_cmd = '/opt/homebrew/bin/tesseract'
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -16,27 +19,17 @@ AI_MODEL_ENDPOINT = os.getenv('AI_MODEL_ENDPOINT')
 PDF_FOLDER = os.path.join(os.getcwd(), 'pdf_folder')
 os.makedirs(PDF_FOLDER, exist_ok=True)
 
-# Function to extract text from a PDF using the AI model
-def extract_text_from_pdf(pdf_path):
-    try:
-        with open(pdf_path, 'rb') as pdf_file:
-            files = {'file': (os.path.basename(pdf_path), pdf_file, 'application/pdf')}
-            response = requests.post(AI_MODEL_ENDPOINT, files=files)
+# Path to the DejaVuSansCondensed.ttf file
+FONT_PATH = '/Users/carlsaginsin/Projects/BingoTelegram/fonts/DejaVuSansCondensed.ttf'
 
-        if response.status_code == 200:
-            extracted_data = response.json()
-            logger.info(f"Raw AI Model Response: {extracted_data}")
+# Class for handling Unicode characters in PDFs using DejaVuSansCondensed.ttf
+class UTF8FPDF(FPDF):
+    def __init__(self):
+        super().__init__()
+        # Add the DejaVuSansCondensed font
+        self.add_font('DejaVu', '', FONT_PATH, uni=True)
 
-            # Return the extracted data
-            return extracted_data
-        else:
-            logger.error(f"Failed to extract text from {pdf_path}: {response.status_code} {response.text}")
-            return None
-    except Exception as e:
-        logger.error(f"Error during PDF text extraction for {pdf_path}: {e}")
-        return None
-
-# Function to create a selectable, legit PDF from an image
+# Function to create a selectable PDF from an image with OCR text extraction
 def create_selectable_pdf_from_image(image_path, pdf_name):
     try:
         # Ensure the PDF will be saved in the pdf_folder
@@ -44,26 +37,44 @@ def create_selectable_pdf_from_image(image_path, pdf_name):
 
         # Open the image file
         image = Image.open(image_path)
-        pdf = FPDF()
+        logger.info(f"Opened image: {image_path}, size: {image.size}")
+
+        # Perform OCR to extract text from the image
+        text = pytesseract.image_to_string(image)
+        logger.info(f"Extracted text from image: {text}")
+
+        # Create a PDF using the Unicode-compatible class
+        pdf = UTF8FPDF()
         pdf.add_page()
 
-        # Set up A4 page size in mm (210 x 297)
-        pdf_w, pdf_h = 210, 297
-        image_w, image_h = image.size
-        aspect_ratio = image_h / image_w
+        # Set the font to DejaVuSansCondensed for full Unicode support
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.set_font("DejaVu", size=12)
 
-        # Set width within A4 page margins
-        new_width = 190
-        new_height = new_width * aspect_ratio
+        # Add the extracted text to the PDF
+        pdf.multi_cell(0, 10, text)
 
-        # Ensure the image is in RGB mode
-        image = image.convert('RGB')
-        
-        # Add the image to the PDF
-        pdf.image(image_path, x=10, y=10, w=new_width, h=new_height)
-        
-        # Output the PDF
+        # Save the PDF
         pdf.output(pdf_path)
         logger.info(f"Created a legitimate PDF at {pdf_path}")
     except Exception as e:
         logger.error(f"Failed to create a legitimate PDF from image: {e}")
+
+# Function to extract text from a PDF using the AI model
+def extract_text_from_pdf(pdf_path):
+    try:
+        with open(pdf_path, 'rb') as pdf_file:
+            files = {'file': (os.path.basename(pdf_path), pdf_file, 'application/pdf')}
+            logger.info(f"Sending PDF {pdf_path} to AI model at {AI_MODEL_ENDPOINT}")
+            response = requests.post(AI_MODEL_ENDPOINT, files=files)
+
+        if response.status_code == 200:
+            extracted_data = response.json()
+            logger.info(f"Raw AI Model Response: {extracted_data}")
+            return extracted_data
+        else:
+            logger.error(f"Failed to extract text from {pdf_path}: {response.status_code} {response.text}")
+            return None
+    except Exception as e:
+        logger.error(f"Error during PDF text extraction for {pdf_path}: {e}")
+        return None
