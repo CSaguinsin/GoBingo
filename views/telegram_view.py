@@ -3,6 +3,8 @@ from telegram.ext import MessageHandler, CommandHandler, filters, Application
 import logging
 import os
 from models.model import extract_text_from_image, process_uploaded_identity_card
+from database.firebase_init import initialize_firestore
+from firebase_admin import firestore  # Import firestore module from firebase_admin
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +27,6 @@ def handle_upload_button_press(update, context):
     else:
         update.message.reply_text("Unexpected input.")
 
-# Handle image upload for Identity Card
 def handle_image_upload(update, context):
     file = None
 
@@ -38,20 +39,36 @@ def handle_image_upload(update, context):
         update.message.reply_text("Please upload an image file (JPEG or PNG).")
         return
 
-    # Create the folder to save the uploaded image
-    image_folder = os.path.join(os.getcwd(), 'IMAGE_PATH')
-    os.makedirs(image_folder, exist_ok=True)
-    
-    file_name = os.path.join(image_folder, 'identity_card.jpg')
-    file.download(file_name)
-    logger.info(f"Saved uploaded image to {file_name}")
+    # You no longer need to save the image here or refer to file_name.
+    # Simply pass the file to process_uploaded_identity_card for text extraction.
 
-    # Now extract the text from the image using Tesseract and OpenCV
-    extracted_text = process_uploaded_identity_card(open(file_name, 'rb'))
+    # Download the file to memory and pass it for text extraction
+    file_bytes = file.download_as_bytearray()
+
+    # Process the uploaded image and extract the text
+    extracted_text = process_uploaded_identity_card(file_bytes)
 
     if extracted_text:
+        # Send the extracted text back to the user
         update.message.reply_text(f"Extracted Text: {extracted_text}")
         logger.info(f"Extracted text: {extracted_text}")
+
+        # Initialize Firestore
+        db = initialize_firestore()
+
+        # Save the extracted text to Firestore
+        try:
+            doc_ref = db.collection('identity_cards').document()  # Auto-generate a document ID
+            doc_ref.set({
+                'extracted_text': extracted_text,
+                'timestamp': firestore.SERVER_TIMESTAMP,
+                'user_id': update.message.from_user.id
+            })
+            logger.info("Text successfully saved to Firestore.")
+        except Exception as e:
+            logger.error(f"Failed to save to Firestore: {e}")
+            update.message.reply_text("Failed to save the extracted text to the database.")
     else:
         update.message.reply_text("Failed to extract information from the Identity Card.")
         logger.error("Extraction failed.")
+

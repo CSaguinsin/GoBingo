@@ -1,5 +1,9 @@
 # Ignore all files in the build directory
 .env
+firebase_init.py
+database/
+gobingotelegram-firebase-adminsdk-pnnmb-dcdfd3fb9b.json
+firebaseSDK/
 image_folder/
 pdf_folder/
 fonts/
