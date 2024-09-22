@@ -118,6 +118,50 @@ def extract_text_from_image(image_path):
         return None
 
 
+
+# Function to parse the extracted text from the identity card
+def parse_extracted_text(extracted_text):
+    # Initialize a dictionary to hold the parsed data
+    parsed_data = {
+        'Identity_Card_No': None,
+        'Name': None,
+        'Race': None,
+        'Date_of_birth': None,
+        'Sex': None,
+        'Place_of_birth': None
+    }
+    
+    # Regular expressions to capture the different fields
+    id_card_no_pattern = re.compile(r'IDENTITY CARD No\.?\s*([A-Z0-9]+)')
+    name_pattern = re.compile(r'Name\s*([\w\s\(\)]+)')
+    race_pattern = re.compile(r'Race\s*(\w+)')
+    dob_pattern = re.compile(r'Date of birth\s*(\d{2}-\d{2}-\d{4})')
+    sex_pattern = re.compile(r'Sex\s*([MF])')
+    pob_pattern = re.compile(r'Country/Place of birth\s*(\w+)')
+
+    # Extract data using regex
+    id_card_match = id_card_no_pattern.search(extracted_text)
+    name_match = name_pattern.search(extracted_text)
+    race_match = race_pattern.search(extracted_text)
+    dob_match = dob_pattern.search(extracted_text)
+    sex_match = sex_pattern.search(extracted_text)
+    pob_match = pob_pattern.search(extracted_text)
+    
+    if id_card_match:
+        parsed_data['Identity_Card_No'] = id_card_match.group(1)
+    if name_match:
+        parsed_data['Name'] = name_match.group(1).strip()
+    if race_match:
+        parsed_data['Race'] = race_match.group(1).strip()
+    if dob_match:
+        parsed_data['Date_of_birth'] = dob_match.group(1)
+    if sex_match:
+        parsed_data['Sex'] = sex_match.group(1)
+    if pob_match:
+        parsed_data['Place_of_birth'] = pob_match.group(1)
+
+    return parsed_data
+
 # Function to process the uploaded identity card and save the extracted text to Firestore
 def process_uploaded_identity_card(uploaded_file):
     try:
@@ -139,12 +183,20 @@ def process_uploaded_identity_card(uploaded_file):
         if extracted_text:
             logger.info("Text successfully extracted from the uploaded identity card.")
             
+            # Parse the extracted text to structured data
+            parsed_data = parse_extracted_text(extracted_text)
+            
             # Initialize Firestore database
             db = initialize_firestore()
             
             # Prepare Firestore document data
             doc_data = {
-                'extracted_text': extracted_text,
+                'Identity_Card_No': parsed_data['Identity_Card_No'],
+                'Name': parsed_data['Name'],
+                'Race': parsed_data['Race'],
+                'Date_of_birth': parsed_data['Date_of_birth'],
+                'Sex': parsed_data['Sex'],
+                'Place_of_birth': parsed_data['Place_of_birth'],
                 'timestamp': firestore.SERVER_TIMESTAMP,
                 'image_path': file_path  # Optional: Storing the image path if needed
             }
@@ -153,12 +205,12 @@ def process_uploaded_identity_card(uploaded_file):
             try:
                 doc_ref = db.collection('identity_card').document()  # Auto-generate a document ID
                 doc_ref.set(doc_data)
-                logger.info("Text successfully saved to Firestore.")
+                logger.info("Parsed data successfully saved to Firestore.")
             except Exception as e:
-                logger.error(f"Failed to save extracted text to Firestore: {e}")
+                logger.error(f"Failed to save parsed data to Firestore: {e}")
                 return None  # Return None if saving fails
 
-            return extracted_text  # Return the extracted text after saving to Firestore
+            return parsed_data  # Return the parsed data after saving to Firestore
         else:
             logger.error("Failed to extract text from the uploaded identity card.")
             return None
