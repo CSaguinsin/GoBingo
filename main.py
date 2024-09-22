@@ -4,7 +4,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from controllers.bot_controller import ask_name, handle_image  # Import handle_image
 import os
 
-# Load environment variables from .env
+# Load environment variables from .env 
 load_dotenv()
 
 # Configure logging to capture any errors or information

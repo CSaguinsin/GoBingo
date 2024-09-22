@@ -9,6 +9,8 @@ import pytesseract
 import cv2
 import numpy as np
 from flask import Flask, request
+from firebase_admin import firestore  # Add this import for Firestore
+from database.firebase_init import initialize_firestore  # Assuming firebase_init is your module for initializing Firestore
 
 app = Flask(__name__)  # Define the Flask app
 
@@ -115,17 +117,19 @@ def extract_text_from_image(image_path):
         logger.error(f"Failed to extract text from image: {e}")
         return None
 
+
+# Function to process the uploaded identity card and save the extracted text to Firestore
 def process_uploaded_identity_card(uploaded_file):
     try:
         # Create image_folder if it doesn't exist
         image_folder = os.path.join(os.getcwd(), 'image_folder')
         os.makedirs(image_folder, exist_ok=True)
 
-        # Generate a unique filename
+        # Generate a unique filename for the uploaded image
         filename = f"identity_card_{os.urandom(8).hex()}.jpg"
         file_path = os.path.join(image_folder, filename)
 
-        # Save the uploaded file
+        # Save the uploaded file to disk
         with open(file_path, "wb") as f:
             f.write(uploaded_file.read())
 
@@ -133,15 +137,36 @@ def process_uploaded_identity_card(uploaded_file):
         extracted_text = extract_text_from_image(file_path)
 
         if extracted_text:
-            logger.info("Text successfully extracted from uploaded identity card.")
-            return extracted_text
+            logger.info("Text successfully extracted from the uploaded identity card.")
+            
+            # Initialize Firestore database
+            db = initialize_firestore()
+            
+            # Prepare Firestore document data
+            doc_data = {
+                'extracted_text': extracted_text,
+                'timestamp': firestore.SERVER_TIMESTAMP,
+                'image_path': file_path  # Optional: Storing the image path if needed
+            }
+
+            # Save to Firestore /identity_card collection
+            try:
+                doc_ref = db.collection('identity_card').document()  # Auto-generate a document ID
+                doc_ref.set(doc_data)
+                logger.info("Text successfully saved to Firestore.")
+            except Exception as e:
+                logger.error(f"Failed to save extracted text to Firestore: {e}")
+                return None  # Return None if saving fails
+
+            return extracted_text  # Return the extracted text after saving to Firestore
         else:
-            logger.error("Failed to extract text from uploaded identity card.")
+            logger.error("Failed to extract text from the uploaded identity card.")
             return None
 
     except Exception as e:
         logger.error(f"Error processing uploaded identity card: {e}")
         return None
+
 
 @app.route('/upload_identity_card', methods=['POST'])
 def upload_identity_card():
