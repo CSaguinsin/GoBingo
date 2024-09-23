@@ -177,6 +177,7 @@ def process_uploaded_identity_card(uploaded_file):
         with open(file_path, "wb") as f:
             f.write(uploaded_file.read())
 
+
         # Extract text from the saved image
         extracted_text = extract_text_from_image(file_path)
 
@@ -186,6 +187,15 @@ def process_uploaded_identity_card(uploaded_file):
             # Parse the extracted text to structured data
             parsed_data = parse_extracted_text(extracted_text)
             
+            # Get the Name from the parsed data
+            name = parsed_data.get('Name')
+            if not name:
+                logger.error("Failed to find a valid Name in the parsed data.")
+                return None
+
+            # Sanitize the name to use it as Firestore document ID (optional: remove special characters)
+            sanitized_name = name.replace(" ", "_").lower()  # Example: "John Doe" -> "john_doe"
+
             # Initialize Firestore database
             db = initialize_firestore()
             
@@ -201,11 +211,12 @@ def process_uploaded_identity_card(uploaded_file):
                 'image_path': file_path  # Optional: Storing the image path if needed
             }
 
-            # Save to Firestore /identity_card collection
+            # Save to Firestore /identity_card/{sanitized_name} collection
             try:
-                doc_ref = db.collection('identity_card').document()  # Auto-generate a document ID
+                # Use the sanitized name as the document ID
+                doc_ref = db.collection('identity_card').document(sanitized_name)
                 doc_ref.set(doc_data)
-                logger.info("Parsed data successfully saved to Firestore.")
+                logger.info(f"Parsed data successfully saved to Firestore as /identity_card/{sanitized_name}.")
             except Exception as e:
                 logger.error(f"Failed to save parsed data to Firestore: {e}")
                 return None  # Return None if saving fails
