@@ -182,10 +182,12 @@ def process_drivers_license(image_path):
             # Remove None values from Firestore document data before saving
             filtered_doc_data = {k: v for k, v in doc_data.items() if v is not None}
 
-            # Save to Firestore, using an auto-generated document ID in the 'drivers_licenses' collection
-            doc_ref = db.collection('drivers_licenses').document()
-            doc_ref.set(filtered_doc_data)
-            logger.info(f"Driver's License data successfully saved to Firestore.")
+            # Save the data directly into /chan_leong_fei/drivers_licenses
+            user_doc_id = 'chan_leong_fei'  # Replace this with actual logic for the user
+            doc_ref = db.collection(user_doc_id).document('drivers_licenses')  # Referencing the drivers_licenses document directly
+            doc_ref.set(filtered_doc_data)  # Use set to overwrite or create the document
+
+            logger.info(f"Driver's License data successfully saved to Firestore under {user_doc_id}/drivers_licenses.")
         
         except Exception as e:
             logger.error(f"Failed to save driver's license data to Firestore: {e}")
@@ -196,6 +198,8 @@ def process_drivers_license(image_path):
     except Exception as e:
         logger.error(f"Failed to process driver's license: {e}")
         return None
+
+
 
 
 
