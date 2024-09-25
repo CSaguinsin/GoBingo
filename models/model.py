@@ -1,6 +1,7 @@
 import os
 import logging
 import re  # For regex pattern matching
+import json  # <-- Added this import
 from dotenv import load_dotenv
 import requests
 from fpdf import FPDF
@@ -8,9 +9,11 @@ from PIL import Image, ImageEnhance, ImageFilter  # For image preprocessing
 import pytesseract
 import cv2
 import numpy as np
+import easyocr  # Import EasyOCR for driver's license processing
 from flask import Flask, request
 from firebase_admin import firestore  # Add this import for Firestore
 from database.firebase_init import initialize_firestore  # Assuming firebase_init is your module for initializing Firestore
+
 
 app = Flask(__name__)  # Define the Flask app
 
@@ -118,6 +121,154 @@ def extract_text_from_image(image_path):
         return None
 
 
+# Function to convert EasyOCR result to JSON (for debugging or logging)
+def convert_to_json(result):
+    data = []
+    for (bbox, text, confidence) in result:
+        entry = {
+            "coordinates": np.array(bbox).tolist(),  # Convert numpy array to list
+            "text": text,
+            "confidence": float(confidence)  # Ensure confidence is a float
+        }
+        data.append(entry)
+    return json.dumps(data, indent=4)
+
+# Function to process the driver's license using EasyOCR
+def process_drivers_license(image_path):
+    try:
+        # Initialize the EasyOCR reader
+        reader = easyocr.Reader(['en'])
+
+        # Read the image
+        img = cv2.imread(image_path)
+
+        if img is None:
+            logger.error(f"Error: Unable to load image at {image_path}")
+            return None
+
+        # Convert the image to grayscale for better OCR accuracy
+        img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # Use EasyOCR to extract text from the grayscale image
+        result = reader.readtext(img_gray)
+
+        # Convert result to JSON (for debugging or logging purposes)
+        json_result = convert_to_json(result)
+        logger.info(f"OCR Result for Driver's License: {json_result}")
+
+        # Extract the key fields from the OCR result
+        license_data = extract_drivers_license_data(result)
+
+        # Log a message if no relevant data was extracted
+        if not any(license_data.values()):
+            logger.error("No relevant driver's license data found.")
+            return None
+
+        # Save the extracted data to Firestore (even if partial data is available)
+        try:
+            # Initialize Firestore database
+            db = initialize_firestore()
+
+            # Prepare Firestore document data
+            doc_data = {
+                'License_Number': license_data.get('License_Number'),
+                'Name': license_data.get('Name', 'Unknown'),  # Default to 'Unknown' if missing
+                'Birth_Date': license_data.get('Birth_Date'),
+                'Issue_Date': license_data.get('Issue_Date'),
+                'timestamp': firestore.SERVER_TIMESTAMP,
+                'image_path': image_path  # Optional: Storing the image path if needed
+            }
+
+            # Remove None values from Firestore document data before saving
+            filtered_doc_data = {k: v for k, v in doc_data.items() if v is not None}
+
+            # Save to Firestore, using an auto-generated document ID in the 'drivers_licenses' collection
+            doc_ref = db.collection('drivers_licenses').document()
+            doc_ref.set(filtered_doc_data)
+            logger.info(f"Driver's License data successfully saved to Firestore.")
+        
+        except Exception as e:
+            logger.error(f"Failed to save driver's license data to Firestore: {e}")
+            return None
+
+        return license_data
+
+    except Exception as e:
+        logger.error(f"Failed to process driver's license: {e}")
+        return None
+
+
+
+# Function to extract specific fields from the OCR result for the driver's license
+def extract_drivers_license_data(ocr_result):
+    license_data = {
+        'License_Number': None,
+        'Name': None,
+        'Birth_Date': None,
+        'Issue_Date': None
+    }
+
+    for (bbox, text, confidence) in ocr_result:
+        text = text.strip().lower()
+
+        # Use basic keyword matching to extract data (improve this based on your OCR results)
+        if 'license' in text and 'number' in text:
+            license_data['License_Number'] = text.split(':')[-1].strip()
+        elif 'name' in text:
+            license_data['Name'] = text.split(':')[-1].strip()
+        elif 'birth date' in text or 'dob' in text:
+            license_data['Birth_Date'] = text.split(':')[-1].strip()
+        elif 'issue date' in text:
+            license_data['Issue_Date'] = text.split(':')[-1].strip()
+
+    # Log warnings for any missing fields
+    if not license_data['License_Number']:
+        logger.warning("License Number is missing in the extracted data.")
+    if not license_data['Name']:
+        logger.warning("Name is missing in the extracted data.")
+    if not license_data['Birth_Date']:
+        logger.warning("Birth Date is missing in the extracted data.")
+    if not license_data['Issue_Date']:
+        logger.warning("Issue Date is missing in the extracted data.")
+
+    return license_data  # Return the extracted (partial or full) license data
+
+
+
+# Function to process the uploaded identity card or driver's license and save to Firestore
+def process_uploaded_document(uploaded_file, document_type):
+    try:
+        # Ensure document_type is correctly handled
+        if document_type not in ['identity_card', 'drivers_license']:
+            logger.error(f"Unsupported document type: {document_type}")
+            return None
+
+        # Create image_folder if it doesn't exist
+        image_folder = os.path.join(os.getcwd(), 'image_folder')
+        os.makedirs(image_folder, exist_ok=True)
+
+        # Generate a unique filename for the uploaded image
+        filename = f"{document_type}_{os.urandom(8).hex()}.jpg"
+        file_path = os.path.join(image_folder, filename)
+
+        # Save the uploaded file to disk
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.read())
+
+        if document_type == 'identity_card':
+            # Process identity card
+            return process_identity_card(file_path)
+        elif document_type == 'drivers_license':
+            # Process driver's license using EasyOCR
+            return process_drivers_license(file_path)
+
+    except Exception as e:
+        logger.error(f"Error processing uploaded {document_type}: {e}")
+        return None
+
+
+
+
 
 # Function to parse the extracted text from the identity card
 def parse_extracted_text(extracted_text):
@@ -162,88 +313,68 @@ def parse_extracted_text(extracted_text):
 
     return parsed_data
 
-# Function to process the uploaded identity card and save the extracted text to Firestore
-def process_uploaded_identity_card(uploaded_file):
-    try:
-        # Create image_folder if it doesn't exist
-        image_folder = os.path.join(os.getcwd(), 'image_folder')
-        os.makedirs(image_folder, exist_ok=True)
+# Function to process the identity card and save to Firestore
+def process_identity_card(image_path):
+    # Extract text from the saved image
+    extracted_text = extract_text_from_image(image_path)
 
-        # Generate a unique filename for the uploaded image
-        filename = f"identity_card_{os.urandom(8).hex()}.jpg"
-        file_path = os.path.join(image_folder, filename)
-
-        # Save the uploaded file to disk
-        with open(file_path, "wb") as f:
-            f.write(uploaded_file.read())
-
-        # Extract text from the saved image
-        extracted_text = extract_text_from_image(file_path)
-
-        if extracted_text:
-            logger.info("Text successfully extracted from the uploaded identity card.")
-            
-            # Parse the extracted text to structured data
-            parsed_data = parse_extracted_text(extracted_text)
-            
-            # Get the Name from the parsed data
-            name = parsed_data.get('Name')
-            if not name:
-                logger.error("Failed to find a valid Name in the parsed data.")
-                return None
-
-            # Sanitize the name to use it as Firestore document ID (optional: remove special characters)
-            sanitized_name = name.replace(" ", "_").lower()  # Example: "John Doe" -> "john_doe"
-
-            # Initialize Firestore database
-            db = initialize_firestore()
-            
-            # Prepare Firestore document data
-            doc_data = {
-                'Identity_Card_No': parsed_data['Identity_Card_No'],
-                'Name': parsed_data['Name'],
-                'Race': parsed_data['Race'],
-                'Date_of_birth': parsed_data['Date_of_birth'],
-                'Sex': parsed_data['Sex'],
-                'Place_of_birth': parsed_data['Place_of_birth'],
-                'timestamp': firestore.SERVER_TIMESTAMP,
-                'image_path': file_path  # Optional: Storing the image path if needed
-            }
-
-            # Save to Firestore {sanitized_name}/identity_card collection
-            try:
-                # Create a document using the sanitized name in a root collection with a sub-collection `identity_card`
-                doc_ref = db.collection(sanitized_name).document('identity_card')
-                doc_ref.set(doc_data)
-                logger.info(f"Parsed data successfully saved to Firestore as /{sanitized_name}/identity_card.")
-            except Exception as e:
-                logger.error(f"Failed to save parsed data to Firestore: {e}")
-                return None  # Return None if saving fails
-
-            return parsed_data  # Return the parsed data after saving to Firestore
-        else:
-            logger.error("Failed to extract text from the uploaded identity card.")
+    if extracted_text:
+        logger.info("Text successfully extracted from the uploaded identity card.")
+        
+        # Parse the extracted text to structured data
+        parsed_data = parse_extracted_text(extracted_text)
+        
+        # Get the Name from the parsed data
+        name = parsed_data.get('Name')
+        if not name:
+            logger.error("Failed to find a valid Name in the parsed data.")
             return None
 
-    except Exception as e:
-        logger.error(f"Error processing uploaded identity card: {e}")
+        # Sanitize the name to use it as Firestore document ID (optional: remove special characters)
+        sanitized_name = name.replace(" ", "_").lower()  # Example: "John Doe" -> "john_doe"
+
+        # Initialize Firestore database
+        db = initialize_firestore()
+        
+        # Prepare Firestore document data
+        doc_data = {
+            'Identity_Card_No': parsed_data['Identity_Card_No'],
+            'Name': parsed_data['Name'],
+            'Race': parsed_data['Race'],
+            'Date_of_birth': parsed_data['Date_of_birth'],
+            'Sex': parsed_data['Sex'],
+            'Place_of_birth': parsed_data['Place_of_birth'],
+            'timestamp': firestore.SERVER_TIMESTAMP,
+            'image_path': image_path  # Optional: Storing the image path if needed
+        }
+
+        # Save to Firestore {sanitized_name}/identity_card collection
+        try:
+            # Create a document using the sanitized name in a root collection with a sub-collection `identity_card`
+            doc_ref = db.collection(sanitized_name).document('identity_card')
+            doc_ref.set(doc_data)
+            logger.info(f"Parsed data successfully saved to Firestore as /{sanitized_name}/identity_card.")
+        except Exception as e:
+            logger.error(f"Failed to save parsed data to Firestore: {e}")
+            return None  # Return None if saving fails
+
+        return parsed_data  # Return the parsed data after saving to Firestore
+    else:
+        logger.error("Failed to extract text from the uploaded identity card.")
         return None
 
-
-
-
-
-@app.route('/upload_identity_card', methods=['POST'])
-def upload_identity_card():
+@app.route('/upload_document', methods=['POST'])
+def upload_document():
     if 'file' not in request.files:
         return 'No file part', 400
     file = request.files['file']
+    document_type = request.form.get('document_type', 'identity_card')  # Default to identity card if not specified
     if file.filename == '':
         return 'No selected file', 400
     if file:
-        extracted_text = process_uploaded_identity_card(file)
-        if extracted_text:
-            return extracted_text, 200
+        extracted_data = process_uploaded_document(file, document_type)
+        if extracted_data:
+            return extracted_data, 200
         else:
             return 'Failed to process image', 500
 
