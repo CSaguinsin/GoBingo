@@ -122,7 +122,7 @@ def extract_text_from_image(image_path):
         logger.error(f"Failed to extract text from image: {e}")
         return None
 
-
+# ss
 # Function to convert EasyOCR result to JSON (for debugging or logging)
 def convert_to_json(result):
     data = []
