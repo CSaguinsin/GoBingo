@@ -1,6 +1,6 @@
 import logging
 from telegram import ReplyKeyboardMarkup, KeyboardButton
-from models.model import process_uploaded_document
+from models.model import process_uploaded_document, fetch_sanitized_name_from_firestore
 from firebase_admin import firestore
 from database.firebase_init import initialize_firestore
 import io
@@ -55,6 +55,15 @@ def handle_image_upload(update, context):
         
         # Retrieve the sanitized_name if already stored in user data (after identity card processing)
         sanitized_name = context.user_data.get('sanitized_name', None)
+
+        # If sanitized_name is missing for non-identity card uploads, fetch it from Firestore
+        if document_type != 'identity_card' and not sanitized_name:
+            user_id = str(update.message.from_user.id)
+            logger.info(f"Fetching sanitized_name from Firestore for user_id: {user_id}")
+            sanitized_name = fetch_sanitized_name_from_firestore(user_id)
+            if not sanitized_name:
+                update.message.reply_text("Missing identity card data. Please upload the Identity Card first.")
+                return
 
         # Process the uploaded document with the sanitized_name if available
         extracted_data = process_uploaded_document(file_like_object, document_type=document_type, sanitized_name=sanitized_name)

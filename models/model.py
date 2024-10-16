@@ -135,9 +135,9 @@ def convert_to_json(result):
         data.append(entry)
     return json.dumps(data, indent=4)
 
+identitycard_name = {}
 
-
-def process_identity_card(image_path):
+def process_identity_card(image_path, user_id):
     # Extract text from the saved image
     extracted_text = extract_text_from_image(image_path)
 
@@ -162,6 +162,9 @@ def process_identity_card(image_path):
 
         logger.info(f"Sanitized name generated: {sanitized_name}")
 
+        # Store the sanitized name in the global dictionary using user_id as key
+        identitycard_name[user_id] = sanitized_name
+
         # Prepare Firestore document data
         doc_data = {
             'Identity_Card_No': parsed_data.get('Identity_Card_No', 'Unknown'),
@@ -173,9 +176,20 @@ def process_identity_card(image_path):
             'timestamp': firestore.SERVER_TIMESTAMP,
             'image_path': image_path
         }
-
         # Filter out None values
         filtered_doc_data = {k: v for k, v in doc_data.items() if v is not None}
+
+        try:
+            # Save the identity card data to Firestore
+            db = initialize_firestore()
+            doc_ref = db.collection('policy_holders').document(sanitized_name)
+            doc_ref.set(filtered_doc_data)
+
+            logger.info(f"Identity Card data successfully saved to Firestore under policy_holders/{sanitized_name}.")
+        
+        except Exception as e:
+            logger.error(f"Failed to save identity card data to Firestore: {e}")
+            return None
 
         # Return the document data as a dictionary
         return filtered_doc_data
@@ -183,8 +197,10 @@ def process_identity_card(image_path):
         logger.error("Failed to extract text from the image.")
         return None
 
+
 def process_drivers_license(image_path, sanitized_name):
     try:
+        # Log the sanitized name for tracking
         logger.info(f"Processing driver's license for sanitized_name: {sanitized_name}")
 
         # Initialize the EasyOCR reader
@@ -240,6 +256,7 @@ def process_drivers_license(image_path, sanitized_name):
         return None
 
 
+
  # Function to fetch the sanitized_name from Firestore based on user_id or other identifier
 def fetch_sanitized_name_from_firestore(user_id):
     try:
@@ -277,16 +294,16 @@ def extract_drivers_license_data(ocr_result):
         text = entry[1].strip()  # entry[1] contains the text in the OCR result
         
         # Match the License Number (e.g., "S7120710 B")
-        if re.match(r'[A-Z0-9]{9}', text):  # Adjust regex based on the format of the license number
+        if re.match(r'[A-Z0-9]{7,}', text):  # Adjust regex to allow 7+ alphanumeric characters
             license_data['License_Number'] = text
         
-        # Match the Name (e.g., "CHAN LEONG FEI")
-        if re.match(r'[A-Z\s\(\)]+', text) and not license_data['Name']:  # Simple pattern to match uppercase names
+        # Match the Name (e.g., "CHAN LEONG FEI") - adjust if more specific patterns are needed
+        if re.match(r'[A-Z\s\(\)]+', text) and not license_data['Name']:  # Match uppercase names
             license_data['Name'] = text
         
-        # Match the Birth Date (e.g., "Birth Date: 22 Jun 1971")
-        if 'Birth Date' in text:
-            license_data['Birth_Date'] = text.replace('Birth Date: ', '').strip()
+        # Match the Birth Date (e.g., "Birth Date: 22 Jun 1971" or variations)
+        if 'Birth Date' in text or 'Birthdate' in text or 'Date of Birth' in text:
+            license_data['Birth_Date'] = re.sub(r'(Birth Date:|Birthdate:|Date of Birth:)', '', text).strip()
         
         # Match the Issue Date (e.g., "Issue Date: 27 Nov 2003")
         if 'Issue Date' in text:
@@ -296,7 +313,7 @@ def extract_drivers_license_data(ocr_result):
 
 
 
-def process_uploaded_document(uploaded_file, document_type, sanitized_name=None):
+def process_uploaded_document(uploaded_file, document_type, user_id=None, sanitized_name=None):
     try:
         if document_type not in ['identity_card', 'drivers_license', 'log_card']:
             logger.error(f"Unsupported document type: {document_type}")
@@ -323,9 +340,10 @@ def process_uploaded_document(uploaded_file, document_type, sanitized_name=None)
 
         # Process the identity card
         if document_type == 'identity_card':
-            result = process_identity_card(file_path)  # Process the identity card first
+            result = process_identity_card(file_path, user_id)  # Process the identity card
             if result and 'sanitized_name' in result:
-                sanitized_name = result['sanitized_name']  # Store sanitized name
+                sanitized_name = result['sanitized_name']  # Store sanitized name in memory
+                identitycard_name[user_id] = sanitized_name  # Store for future use
             else:
                 logger.error("Failed to extract sanitized name from identity card.")
                 return None
@@ -335,14 +353,18 @@ def process_uploaded_document(uploaded_file, document_type, sanitized_name=None)
             if not sanitized_name:
                 logger.error("Cannot process driver's license without sanitized name.")
                 return None
-            result = process_drivers_license(file_path, sanitized_name)  # Process driver's license
+
+            # Process the driver's license using the sanitized name
+            result = process_drivers_license(file_path, sanitized_name)
 
         # Process the log card
         elif document_type == 'log_card':
             if not sanitized_name:
                 logger.error("Cannot process log card without sanitized name.")
                 return None
-            result = process_log_card(file_path, sanitized_name)  # Process log card
+
+            # Process the log card using the sanitized name
+            result = process_log_card(file_path, sanitized_name)
 
         else:
             logger.error("Unsupported document type.")
@@ -358,7 +380,6 @@ def process_uploaded_document(uploaded_file, document_type, sanitized_name=None)
     except Exception as e:
         logger.error(f"Error processing uploaded {document_type}: {e}")
         return None
-
 
 
 
@@ -419,61 +440,70 @@ def parse_extracted_text(extracted_text):
     return parsed_data
 
 
+def process_log_card(image_path, sanitized_name):
+    """
+    Process the log card, extract relevant data, and save it in Firestore.
+    """
+    # Extract text from the saved image using OCR
+    extracted_text = extract_text_from_image(image_path)
+    
+    if extracted_text:
+        logger.info(f"Extracted text from log card: {extracted_text}")  # Log the full extracted text
+        
+        # Parse the extracted text to structured data
+        parsed_data = parse_log_card_text(extracted_text)
+        
+        logger.info(f"Parsed log card data: {parsed_data}")  # Log the parsed data
+        
+        # Prepare Firestore document data
+        log_card_data = {
+            'Vehicle_No': parsed_data.get('Vehicle_No', 'Unknown'),
+            'Vehicle_Type': parsed_data.get('Vehicle_Type', 'Unknown'),
+            'Make_Model': parsed_data.get('Make_Model', 'Unknown'),
+            'Year_of_Manufacture': parsed_data.get('Year_of_Manufacture', None),
+            'Chassis_No': parsed_data.get('Chassis_No', None),
+            'Engine_No': parsed_data.get('Engine_No', None),
+            'Engine_Capacity': parsed_data.get('Engine_Capacity', None),
+            'Road_Tax_Expiry_Date': parsed_data.get('Road_Tax_Expiry_Date', None),
+            'COE_Expiry_Date': parsed_data.get('COE_Expiry_Date', None),
+            'Original_Registration_Date': parsed_data.get('Original_Registration_Date', None),
+            'Lifespan_Expiry_Date': parsed_data.get('Lifespan_Expiry_Date', None),
+            'Inspection_Due_Date': parsed_data.get('Inspection_Due_Date', None),  # New field
+            'PQP_Paid': parsed_data.get('PQP_Paid', None),  # New field
+            'Intended_Transfer_Date': parsed_data.get('Intended_Transfer_Date', None),  # New field
+            'timestamp': firestore.SERVER_TIMESTAMP,
+            'image_path': image_path  # Store the image path if needed
+        }
+
+        # Filter out None values to avoid writing empty fields to Firestore
+        filtered_log_card_data = {k: v for k, v in log_card_data.items() if v is not None}
+
+        try:
+            # Initialize Firestore and reference the user's log_card subcollection
+            db = initialize_firestore()
+            doc_ref = db.collection('policy_holders').document(sanitized_name)
+
+            # Save the log card data in the `log_card` subcollection
+            subcollection_ref = doc_ref.collection('log_card').document()  # Auto-generate a document ID
+            subcollection_ref.set(filtered_log_card_data)
+
+            logger.info(f"Log card data successfully saved to Firestore under policy_holders/{sanitized_name}/log_card.")
+
+        except Exception as e:
+            logger.error(f"Failed to save log card data to Firestore: {e}")
+            return None
+
+        return parsed_data
+
+    else:
+        logger.error("Failed to extract text from the uploaded log card.")
+        return None
 
 
-
-# Function to extract specific fields from the OCR result for the log card
-def extract_log_card_data(ocr_result):
-    log_card_data = {
-        'Vehicle_No': None,
-        'Vehicle_Type': None,
-        'Make_Model': None,
-        'Year_of_Manufacture': None,
-        'Chassis_No': None,
-        'Engine_No': None,
-        'Engine_Capacity': None,
-        'Road_Tax_Expiry_Date': None,
-        'COE_Expiry_Date': None,
-        'Original_Registration_Date': None,
-        'Lifespan_Expiry_Date': None
-    }
-
-    for (bbox, text, confidence) in ocr_result:
-        text = text.strip().lower()
-
-        # Keyword matching for log card fields (adapt this based on extracted text patterns)
-        if 'vehicle no' in text:
-            log_card_data['Vehicle_No'] = text.split(':')[-1].strip()
-        elif 'vehicle type' in text:
-            log_card_data['Vehicle_Type'] = text.split(':')[-1].strip()
-        elif 'make' in text and 'model' in text:
-            log_card_data['Make_Model'] = text.split(':')[-1].strip()
-        elif 'year of manufacture' in text:
-            log_card_data['Year_of_Manufacture'] = text.split(':')[-1].strip()
-        elif 'chassis no' in text:
-            log_card_data['Chassis_No'] = text.split(':')[-1].strip()
-        elif 'engine no' in text:
-            log_card_data['Engine_No'] = text.split(':')[-1].strip()
-        elif 'engine capacity' in text:
-            log_card_data['Engine_Capacity'] = text.split(':')[-1].strip()
-        elif 'road tax expiry date' in text:
-            log_card_data['Road_Tax_Expiry_Date'] = text.split(':')[-1].strip()
-        elif 'coe expiry date' in text:
-            log_card_data['COE_Expiry_Date'] = text.split(':')[-1].strip()
-        elif 'original registration date' in text:
-            log_card_data['Original_Registration_Date'] = text.split(':')[-1].strip()
-        elif 'lifespan expiry date' in text:
-            log_card_data['Lifespan_Expiry_Date'] = text.split(':')[-1].strip()
-
-    # Log missing fields as warnings
-    for field, value in log_card_data.items():
-        if not value:
-            logger.warning(f"{field.replace('_', ' ').title()} is missing in the extracted data.")
-
-    return log_card_data
-
-# Function to parse the extracted text from the log card using regex
 def parse_log_card_text(extracted_text):
+    """
+    Parse the extracted text from the log card and return structured data.
+    """
     # Initialize a dictionary to hold the parsed data
     log_card_data = {
         'Vehicle_No': None,
@@ -486,21 +516,27 @@ def parse_log_card_text(extracted_text):
         'Road_Tax_Expiry_Date': None,
         'COE_Expiry_Date': None,
         'Original_Registration_Date': None,
-        'Lifespan_Expiry_Date': None
+        'Lifespan_Expiry_Date': None,
+        'PQP_Paid': None,
+        'Inspection_Due_Date': None,
+        'Intended_Transfer_Date': None
     }
 
     # Regular expressions to capture log card fields
     vehicle_no_pattern = re.compile(r'Vehicle No\.\s*([A-Z0-9]+)')
-    vehicle_type_pattern = re.compile(r'Vehicle Type\s*([\w\s\-]+)')
-    make_model_pattern = re.compile(r'Make/Model\s*([\w\s\/]+)')
-    year_of_manufacture_pattern = re.compile(r'Year Of Manufacture\s*(\d{4})')
+    vehicle_type_pattern = re.compile(r'Vehicle Type:\s*([\w\s\/\-]+)')
+    make_model_pattern = re.compile(r'Make\s*\/\s*Model\s*([\w\s\/\.]+)')
+    year_of_manufacture_pattern = re.compile(r'Year Of Manufacture:\s*(\d{4})')
     chassis_no_pattern = re.compile(r'Chassis No\.\s*([A-Z0-9]+)')
     engine_no_pattern = re.compile(r'Engine No\.\s*([A-Z0-9]+)')
-    engine_capacity_pattern = re.compile(r'Engine Capacity\s*(\d+\s*cc)')
-    road_tax_expiry_pattern = re.compile(r'Road Tax Expiry Date\s*([\d\s\w]+)')
-    coe_expiry_pattern = re.compile(r'COE Expiry Date\s*([\d\s\w]+)')
-    original_reg_date_pattern = re.compile(r'Original Registration Date\s*([\d\s\w]+)')
-    lifespan_expiry_pattern = re.compile(r'Lifespan Expiry Date\s*([\d\s\w]+)')
+    engine_capacity_pattern = re.compile(r'Engine Capacity\s*:\s*(\d+\s*cc)')
+    road_tax_expiry_pattern = re.compile(r'Road Tax Expiry Date:\s*([\d\s\w]+)')
+    coe_expiry_pattern = re.compile(r'COE Expiry Date:\s*([\d\s\w]+)')
+    original_reg_date_pattern = re.compile(r'Original Registration Date:\s*([\d\s\w]+)')
+    lifespan_expiry_pattern = re.compile(r'Lifespan Expiry Date:\s*([\d\s\w]*)')
+    pqp_paid_pattern = re.compile(r'PQP Paid:\s*\$(\S+)')
+    inspection_due_date_pattern = re.compile(r'Inspection Due Date:\s*([\d\s\w]+)')
+    intended_transfer_date_pattern = re.compile(r'Intended Transfer Date:\s*([\d\s\w]+)')
 
     # Extract data using regex
     vehicle_no_match = vehicle_no_pattern.search(extracted_text)
@@ -514,6 +550,9 @@ def parse_log_card_text(extracted_text):
     coe_expiry_match = coe_expiry_pattern.search(extracted_text)
     original_reg_date_match = original_reg_date_pattern.search(extracted_text)
     lifespan_expiry_match = lifespan_expiry_pattern.search(extracted_text)
+    pqp_paid_match = pqp_paid_pattern.search(extracted_text)
+    inspection_due_date_match = inspection_due_date_pattern.search(extracted_text)
+    intended_transfer_date_match = intended_transfer_date_pattern.search(extracted_text)
 
     # Store extracted data in the dictionary
     if vehicle_no_match:
@@ -531,15 +570,22 @@ def parse_log_card_text(extracted_text):
     if engine_capacity_match:
         log_card_data['Engine_Capacity'] = engine_capacity_match.group(1)
     if road_tax_expiry_match:
-        log_card_data['Road_Tax_Expiry_Date'] = road_tax_expiry_match.group(1)
+        log_card_data['Road_Tax_Expiry_Date'] = road_tax_expiry_match.group(1).strip()
     if coe_expiry_match:
-        log_card_data['COE_Expiry_Date'] = coe_expiry_match.group(1)
+        log_card_data['COE_Expiry_Date'] = coe_expiry_match.group(1).strip()
     if original_reg_date_match:
-        log_card_data['Original_Registration_Date'] = original_reg_date_match.group(1)
-    if lifespan_expiry_match:
-        log_card_data['Lifespan_Expiry_Date'] = lifespan_expiry_match.group(1)
+        log_card_data['Original_Registration_Date'] = original_reg_date_match.group(1).strip()
+    if lifespan_expiry_match and lifespan_expiry_match.group(1):
+        log_card_data['Lifespan_Expiry_Date'] = lifespan_expiry_match.group(1).strip()
+    if pqp_paid_match:
+        log_card_data['PQP_Paid'] = pqp_paid_match.group(1)
+    if inspection_due_date_match:
+        log_card_data['Inspection_Due_Date'] = inspection_due_date_match.group(1).strip()
+    if intended_transfer_date_match:
+        log_card_data['Intended_Transfer_Date'] = intended_transfer_date_match.group(1).strip()
 
     return log_card_data
+
 
 def get_user_id_from_firestore(name):
     """
@@ -565,88 +611,10 @@ def get_user_id_from_firestore(name):
     except Exception as e:
         logger.error(f"Error retrieving user_id from Firestore: {e}")
         return None
+    
+    
 
-def process_log_card(image_path, user_id):
-    """
-    Process the log card, extract relevant data, and save it in Firestore.
-    """
-    # Extract text from the saved image using OCR (Tesseract or other)
-    extracted_text = extract_text_from_image(image_path)
 
-    if extracted_text:
-        logger.info("Text successfully extracted from the uploaded log card.")
-
-        # Parse the extracted text to structured data using regex
-        parsed_data = parse_log_card_text(extracted_text)
-
-        # Initialize Firestore database
-        db = initialize_firestore()
-
-        # Fetch the user's name from their identity card
-        name = get_existing_user_name(db, user_id)
-        if not name:
-            logger.error("Name not found in existing identity_card. Cannot save log card.")
-            return None
-
-        # Sanitize the name for use in Firestore document paths
-        sanitized_name = name.replace(" ", "_").lower()  # Example: "CHAN LEONG FEI" -> "chan_leong_fei"
-
-        # Prepare Firestore document data for the log card
-        log_card_data = {
-            'Vehicle_No': parsed_data.get('Vehicle_No', 'Unknown'),
-            'Vehicle_Type': parsed_data.get('Vehicle_Type', 'Unknown'),
-            'Make_Model': parsed_data.get('Make_Model', 'Unknown'),
-            'Year_of_Manufacture': parsed_data.get('Year_of_Manufacture'),
-            'Chassis_No': parsed_data.get('Chassis_No'),
-            'Engine_No': parsed_data.get('Engine_No'),
-            'Engine_Capacity': parsed_data.get('Engine_Capacity'),
-            'Road_Tax_Expiry_Date': parsed_data.get('Road_Tax_Expiry_Date'),
-            'COE_Expiry_Date': parsed_data.get('COE_Expiry_Date'),
-            'Original_Registration_Date': parsed_data.get('Original_Registration_Date'),
-            'Lifespan_Expiry_Date': parsed_data.get('Lifespan_Expiry_Date'),
-            'timestamp': firestore.SERVER_TIMESTAMP,
-            'image_path': image_path  # Store the image path if needed
-        }
-
-        # Filter out None values
-        filtered_log_card_data = {k: v for k, v in log_card_data.items() if v is not None}
-
-        try:
-            # Reference the user's document and log_card subcollection
-            doc_ref = db.collection(sanitized_name).document('log_card')
-
-            # Save the log card data in the Firestore document
-            doc_ref.set(filtered_log_card_data)
-            logger.info(f"Log card data successfully saved to Firestore under {sanitized_name}/log_card.")
-        except Exception as e:
-            logger.error(f"Failed to save log card data to Firestore: {e}")
-            return None
-
-        return parsed_data
-    else:
-        logger.error("Failed to extract text from the uploaded log card.")
-        return None
-
-def get_existing_user_name(db, user_id):
-    """
-    Function to fetch the existing user's name from the identity_card subcollection.
-    """
-    try:
-        # Reference the user's identity_card document
-        identity_card_doc = db.collection('policy_holders').document(user_id).collection('identity_card').document('identity_card_data').get()
-
-        if identity_card_doc.exists:
-            identity_card_data = identity_card_doc.to_dict()
-            print(f"Fetched Identity Card Data: {identity_card_data}")  # Debugging output
-            if 'Name' in identity_card_data:
-                return identity_card_data['Name']  # Return the name from the identity card
-        else:
-            logger.error("Identity card document does not exist.")
-            return None
-
-    except Exception as e:
-        logger.error(f"Error fetching existing user name from Firestore: {e}")
-        return None
 
 
 # Modify the /upload_document route to handle log card processing
