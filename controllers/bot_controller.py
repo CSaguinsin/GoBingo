@@ -2,9 +2,8 @@ import io
 import logging
 from telegram import Update
 from telegram.ext import CallbackContext, ConversationHandler
-from models.model import process_uploaded_document, process_drivers_license, fetch_sanitized_name_from_firestore
+from models.model import process_uploaded_document, process_identity_card, fetch_sanitized_name_from_firestore, send_data_to_monday
 from views.telegram_view import create_upload_button
-from models.model import process_identity_card
 import os
 
 logger = logging.getLogger(__name__)
@@ -19,7 +18,6 @@ async def ask_name(update: Update, context: CallbackContext) -> int:
     
     context.user_data['document_type'] = 'identity_card'  # Initial document type
     return UPLOADING
-
 
 async def handle_upload_button_press(update: Update, context: CallbackContext) -> int:
     message_text = update.message.text
@@ -37,7 +35,6 @@ async def handle_upload_button_press(update: Update, context: CallbackContext) -
         await update.message.reply_text("Unexpected input.")
     
     return UPLOADING
-
 
 async def handle_image(update: Update, context: CallbackContext) -> int:
     try:
@@ -62,13 +59,12 @@ async def handle_image(update: Update, context: CallbackContext) -> int:
         # Determine which document type is being uploaded
         document_type = context.user_data.get('document_type', 'identity_card')
 
-        # Save the file to disk
+        # Save the file to disk (could be used for logging or future analysis)
         image_folder = os.path.join(os.getcwd(), 'image_folder')
         os.makedirs(image_folder, exist_ok=True)
         filename = f"{document_type}_{os.urandom(8).hex()}.jpg"
         image_path = os.path.join(image_folder, filename)
 
-        # Write the bytes to disk as an image
         with open(image_path, "wb") as f:
             f.write(file_bytes)
 
@@ -76,54 +72,66 @@ async def handle_image(update: Update, context: CallbackContext) -> int:
 
         # Process the uploaded document based on document type
         if document_type == 'identity_card':
-            # No sanitized_name is passed for identity card uploads, we generate it here
             extracted_data = process_identity_card(image_path, user_id=str(update.message.from_user.id))
 
             if extracted_data:
-                # Save the sanitized_name from the identity card extraction for future use
                 sanitized_name = extracted_data.get('sanitized_name')
                 context.user_data['sanitized_name'] = sanitized_name
+                context.user_data['identity_card_data'] = extracted_data  # Save data temporarily
 
-                logger.info(f"Sanitized name stored: {sanitized_name}")
-
-                # Prompt the user to upload the driver's license
+                # Prompt for driver's license upload
                 reply_markup = create_upload_button("Upload Policy holder's Driver's License")
                 await update.message.reply_text("Identity Card uploaded successfully. Now please upload the Driver's License.", reply_markup=reply_markup)
                 context.user_data['document_type'] = 'drivers_license'
-
             else:
                 logger.error("Failed to process identity card.")
                 await update.message.reply_text("Failed to extract information from the Identity Card.")
                 return UPLOADING
 
         else:
-            # For non-identity card uploads (driver's license, log card), we need the sanitized name
             sanitized_name = context.user_data.get('sanitized_name')
-
             if not sanitized_name:
-                # Fetch the sanitized name from Firestore if not available in memory
                 user_id = str(update.message.from_user.id)
-                logger.info(f"Fetching sanitized_name from Firestore for user_id: {user_id}")
                 sanitized_name = fetch_sanitized_name_from_firestore(user_id)
                 if not sanitized_name:
                     await update.message.reply_text("Missing identity card data. Please upload the Identity Card first.")
                     return UPLOADING
 
-            # Process the driver's license or log card with the sanitized name
             extracted_data = process_uploaded_document(image_path, document_type=document_type, sanitized_name=sanitized_name)
 
             if extracted_data:
-                logger.info(f"Extracted data: {extracted_data}")
-                await update.message.reply_text(f"Extracted Data: {extracted_data}")
-
+                # Save data for each document temporarily
                 if document_type == 'drivers_license':
-                    # Prompt the user to upload the log card next
+                    context.user_data['drivers_license_data'] = extracted_data
+
+                    # Prompt for log card upload
                     reply_markup = create_upload_button("Upload Policy holder's Log Card")
                     await update.message.reply_text("Driver's License uploaded successfully. Now please upload the Log Card.", reply_markup=reply_markup)
                     context.user_data['document_type'] = 'log_card'
 
                 elif document_type == 'log_card':
-                    await update.message.reply_text("All documents uploaded successfully. Thank you!")
+                    context.user_data['log_card_data'] = extracted_data
+
+                    # Now, check if all three documents are uploaded
+                    if ('identity_card_data' in context.user_data and
+                            'drivers_license_data' in context.user_data and
+                            'log_card_data' in context.user_data):
+
+                        # Combine all data to send to Monday.com
+                        complete_data = {
+                            'identity_card': context.user_data['identity_card_data'],
+                            'drivers_license': context.user_data['drivers_license_data'],
+                            'log_card': context.user_data['log_card_data']
+                        }
+
+                        send_to_monday_result = send_data_to_monday(complete_data)
+                        if send_to_monday_result:
+                            await update.message.reply_text("All documents uploaded successfully and data sent to Monday.com. Thank you!")
+                        else:
+                            await update.message.reply_text("Error occurred while sending data to Monday.com.")
+                    else:
+                        await update.message.reply_text("Failed to upload all documents.")
+                        logger.error("All documents not uploaded.")
             else:
                 await update.message.reply_text("Failed to extract information from the uploaded document.")
                 logger.error("Extraction failed.")

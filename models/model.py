@@ -135,6 +135,8 @@ def convert_to_json(result):
         data.append(entry)
     return json.dumps(data, indent=4)
 
+
+
 identitycard_name = {}
 
 def process_identity_card(image_path, user_id):
@@ -158,7 +160,6 @@ def process_identity_card(image_path, user_id):
         sanitized_name = re.sub(r'[^\w\s]', '', name)  # Remove special characters (except spaces)
         sanitized_name = sanitized_name.replace("\n", " ").replace("\r", " ").strip()  # Replace newlines with spaces and trim
         sanitized_name = sanitized_name.replace(" ", "_").lower()  # Convert to lowercase and replace spaces with underscores
-        # Example: "John Doe\n(Something)" -> "john_doe"
 
         logger.info(f"Sanitized name generated: {sanitized_name}")
 
@@ -172,11 +173,10 @@ def process_identity_card(image_path, user_id):
             'Date_of_birth': parsed_data.get('Date_of_birth', "Unknown"),
             'Sex': parsed_data.get('Sex', "Unknown"),
             'Place_of_birth': parsed_data.get('Place_of_birth', "Unknown"),
-            'sanitized_name': sanitized_name,  # Store cleaned sanitized name for reuse
+            'sanitized_name': sanitized_name,
             'timestamp': firestore.SERVER_TIMESTAMP,
             'image_path': image_path
         }
-        # Filter out None values
         filtered_doc_data = {k: v for k, v in doc_data.items() if v is not None}
 
         try:
@@ -191,16 +191,32 @@ def process_identity_card(image_path, user_id):
             logger.error(f"Failed to save identity card data to Firestore: {e}")
             return None
 
+        # Now update the `data_into_monday` for this user
+        if sanitized_name not in data_into_monday:
+            data_into_monday[sanitized_name] = {}
+
+        data_into_monday[sanitized_name].update({
+            'sanitized_name': sanitized_name,
+            'Identity_Card_No': parsed_data.get('Identity_Card_No', 'Unknown'),
+            'Race': parsed_data.get('Race', 'Unknown'),
+            'Date_of_birth': parsed_data.get('Date_of_birth', 'Unknown'),
+            'Sex': parsed_data.get('Sex', 'Unknown'),
+            'Place_of_birth': parsed_data.get('Place_of_birth', 'Unknown')
+        })
+
+        logger.info(f"Identity card data for {sanitized_name} added to data_into_monday.")
+
+        # Check if all required documents are processed and send data to Monday
+        check_and_send_to_monday(sanitized_name)
+
         # Return the document data as a dictionary
         return filtered_doc_data
     else:
         logger.error("Failed to extract text from the image.")
         return None
 
-
 def process_drivers_license(image_path, sanitized_name):
     try:
-        # Log the sanitized name for tracking
         logger.info(f"Processing driver's license for sanitized_name: {sanitized_name}")
 
         # Initialize the EasyOCR reader
@@ -233,14 +249,13 @@ def process_drivers_license(image_path, sanitized_name):
             'image_path': image_path
         }
         filtered_doc_data = {k: v for k, v in doc_data.items() if v is not None}
-
         try:
             # Save the driver's license data to Firestore
             db = initialize_firestore()
             doc_ref = db.collection('policy_holders').document(sanitized_name)
 
             # Save the driver's license data in the `drivers_license` subcollection
-            subcollection_ref = doc_ref.collection('drivers_license').document()  # Auto-generate a document ID
+            subcollection_ref = doc_ref.collection('drivers_license').document()
             subcollection_ref.set(filtered_doc_data)
 
             logger.info(f"Driver's License data successfully saved to Firestore under policy_holders/{sanitized_name}/drivers_license.")
@@ -248,6 +263,21 @@ def process_drivers_license(image_path, sanitized_name):
         except Exception as e:
             logger.error(f"Failed to save driver's license data to Firestore: {e}")
             return None
+
+        # Update the `data_into_monday` for this user
+        if sanitized_name not in data_into_monday:
+            data_into_monday[sanitized_name] = {}
+
+        data_into_monday[sanitized_name].update({
+            'License_Number': license_data.get('License_Number', 'Unknown'),
+            'Birth_Date': license_data.get('Birth_Date', 'Unknown'),
+            'Issue_Date': license_data.get('Issue_Date', 'Unknown')
+        })
+
+        logger.info(f"Driver's license data for {sanitized_name} added to data_into_monday.")
+
+        # Check if all required documents are processed and send data to Monday
+        check_and_send_to_monday(sanitized_name)
 
         return license_data
 
@@ -312,14 +342,18 @@ def extract_drivers_license_data(ocr_result):
     return license_data
 
 
-
 def process_uploaded_document(uploaded_file, document_type, user_id=None, sanitized_name=None):
+    """
+    This function processes an uploaded document, stores the data in Firestore, 
+    and adds the sanitized data to the global dictionary for Monday.com.
+    """
     try:
+        # Validate document type
         if document_type not in ['identity_card', 'drivers_license', 'log_card']:
             logger.error(f"Unsupported document type: {document_type}")
             return None
 
-        # Create image_folder if it doesn't exist
+        # Create 'image_folder' if it doesn't exist
         image_folder = os.path.join(os.getcwd(), 'image_folder')
         os.makedirs(image_folder, exist_ok=True)
 
@@ -327,22 +361,28 @@ def process_uploaded_document(uploaded_file, document_type, user_id=None, saniti
         filename = f"{document_type}_{os.urandom(8).hex()}.jpg"
         file_path = os.path.join(image_folder, filename)
 
-        # Check if uploaded_file is a file-like object or a file path (string)
+        # File handling: Save file or use existing path
         if hasattr(uploaded_file, 'read'):  # It's a file-like object
-            # Save the uploaded file to disk
             with open(file_path, "wb") as f:
                 f.write(uploaded_file.read())
             logger.info(f"Saved file to {file_path}")
         else:
-            # Assume uploaded_file is a file path, so no need to write it again
+            if not os.path.exists(uploaded_file):
+                logger.error(f"File path does not exist: {uploaded_file}")
+                return None
             file_path = uploaded_file  # Use the provided file path directly
             logger.info(f"Using existing file at {file_path}")
 
+        # Initialize variables to store extracted data
+        identity_data = None
+        drivers_license_data = None
+        log_card_data = None
+
         # Process the identity card
         if document_type == 'identity_card':
-            result = process_identity_card(file_path, user_id)  # Process the identity card
-            if result and 'sanitized_name' in result:
-                sanitized_name = result['sanitized_name']  # Store sanitized name in memory
+            identity_data = process_identity_card(file_path, user_id)  # Process the identity card
+            if identity_data and 'sanitized_name' in identity_data:
+                sanitized_name = identity_data['sanitized_name']  # Store sanitized name in memory
                 identitycard_name[user_id] = sanitized_name  # Store for future use
             else:
                 logger.error("Failed to extract sanitized name from identity card.")
@@ -355,7 +395,7 @@ def process_uploaded_document(uploaded_file, document_type, user_id=None, saniti
                 return None
 
             # Process the driver's license using the sanitized name
-            result = process_drivers_license(file_path, sanitized_name)
+            drivers_license_data = process_drivers_license(file_path, sanitized_name)
 
         # Process the log card
         elif document_type == 'log_card':
@@ -364,15 +404,53 @@ def process_uploaded_document(uploaded_file, document_type, user_id=None, saniti
                 return None
 
             # Process the log card using the sanitized name
-            result = process_log_card(file_path, sanitized_name)
-
-        else:
-            logger.error("Unsupported document type.")
-            return None
+            log_card_data = process_log_card(file_path, sanitized_name)
 
         # Check if the result is valid
-        if isinstance(result, dict):
-            return result
+        if isinstance(identity_data, dict) or isinstance(drivers_license_data, dict) or isinstance(log_card_data, dict):
+            # Combine and sanitize data from all documents and store in the global dictionary
+            sanitized_data = sanitize_and_store_data(
+                user_data=user_id,
+                identity_data=identity_data,
+                drivers_license_data=drivers_license_data,
+                log_card_data=log_card_data
+            )
+
+            logger.info(f"Sanitized data stored for user {user_id}.")
+
+            # Keep the original Firestore logic intact, saving the document data to Firestore
+            # This logic should not be altered to ensure data is still saved in Firestore as intended.
+            if document_type == 'identity_card' and identity_data:
+                try:
+                    db = initialize_firestore()
+                    doc_ref = db.collection('policy_holders').document(sanitized_name)
+                    doc_ref.set(identity_data)  # Save identity card data to Firestore
+                    logger.info(f"Identity Card data successfully saved to Firestore under policy_holders/{sanitized_name}.")
+                except Exception as e:
+                    logger.error(f"Failed to save identity card data to Firestore: {e}")
+
+            elif document_type == 'drivers_license' and drivers_license_data:
+                try:
+                    db = initialize_firestore()
+                    doc_ref = db.collection('policy_holders').document(sanitized_name)
+                    subcollection_ref = doc_ref.collection('drivers_license').document()
+                    subcollection_ref.set(drivers_license_data)  # Save driver's license data to Firestore
+                    logger.info(f"Driver's License data successfully saved to Firestore under policy_holders/{sanitized_name}/drivers_license.")
+                except Exception as e:
+                    logger.error(f"Failed to save driver's license data to Firestore: {e}")
+
+            elif document_type == 'log_card' and log_card_data:
+                try:
+                    db = initialize_firestore()
+                    doc_ref = db.collection('policy_holders').document(sanitized_name)
+                    subcollection_ref = doc_ref.collection('log_card').document()
+                    subcollection_ref.set(log_card_data)  # Save log card data to Firestore
+                    logger.info(f"Log Card data successfully saved to Firestore under policy_holders/{sanitized_name}/log_card.")
+                except Exception as e:
+                    logger.error(f"Failed to save log card data to Firestore: {e}")
+
+            return sanitized_data  # Return the sanitized data after processing
+
         else:
             logger.error(f"Unexpected result format from {document_type} processing.")
             return None
@@ -380,9 +458,6 @@ def process_uploaded_document(uploaded_file, document_type, user_id=None, saniti
     except Exception as e:
         logger.error(f"Error processing uploaded {document_type}: {e}")
         return None
-
-
-
 
 
 # Function to parse the extracted text from identity card
@@ -398,11 +473,19 @@ def parse_extracted_text(extracted_text):
             logger.warning("Identity Card No. not found in the extracted text.")
 
         # Extract Name (assume it's the line following "Name")
-        name_match = re.search(r'Name\s*([A-Z\s\(\)!]+)', extracted_text, re.IGNORECASE)
+        name_match = re.search(r'Name\s*([A-Z\s\(\)]+)', extracted_text, re.IGNORECASE)
         if name_match:
+            # Extract the name and sanitize
             name = name_match.group(1).strip()
-            # Remove any unwanted characters like '!'
-            parsed_data['Name'] = name.replace('!', '').strip()
+
+            # Remove any text in parentheses (e.g., "(Chen Lianghui)")
+            name = re.sub(r'\(.*?\)', '', name).strip()
+
+            # Remove any extra exclamation marks or unwanted symbols
+            name = name.replace('!', '').strip()
+
+            # Ensure only the name is captured, not extra text
+            parsed_data['Name'] = name
         else:
             logger.warning("Name not found in the extracted text.")
 
@@ -441,15 +524,12 @@ def parse_extracted_text(extracted_text):
 
 
 def process_log_card(image_path, sanitized_name):
-    """
-    Process the log card, extract relevant data, and save it in Firestore.
-    """
     # Extract text from the saved image using OCR
     extracted_text = extract_text_from_image(image_path)
     
     if extracted_text:
-        logger.info(f"Extracted text from log card: {extracted_text}")  # Log the full extracted text
-        
+        logger.debug(f"Extracted text from log card: {extracted_text}")  # Log the raw extracted text only in debug
+
         # Parse the extracted text to structured data
         parsed_data = parse_log_card_text(extracted_text)
         
@@ -468,14 +548,12 @@ def process_log_card(image_path, sanitized_name):
             'COE_Expiry_Date': parsed_data.get('COE_Expiry_Date', None),
             'Original_Registration_Date': parsed_data.get('Original_Registration_Date', None),
             'Lifespan_Expiry_Date': parsed_data.get('Lifespan_Expiry_Date', None),
-            'Inspection_Due_Date': parsed_data.get('Inspection_Due_Date', None),  # New field
-            'PQP_Paid': parsed_data.get('PQP_Paid', None),  # New field
-            'Intended_Transfer_Date': parsed_data.get('Intended_Transfer_Date', None),  # New field
+            'Inspection_Due_Date': parsed_data.get('Inspection_Due_Date', None),
+            'PQP_Paid': parsed_data.get('PQP_Paid', None),
+            'Intended_Transfer_Date': parsed_data.get('Intended_Transfer_Date', None),
             'timestamp': firestore.SERVER_TIMESTAMP,
             'image_path': image_path  # Store the image path if needed
         }
-
-        # Filter out None values to avoid writing empty fields to Firestore
         filtered_log_card_data = {k: v for k, v in log_card_data.items() if v is not None}
 
         try:
@@ -493,11 +571,29 @@ def process_log_card(image_path, sanitized_name):
             logger.error(f"Failed to save log card data to Firestore: {e}")
             return None
 
+        # Update the `data_into_monday` for this user
+        if sanitized_name not in data_into_monday:
+            data_into_monday[sanitized_name] = {}
+
+        data_into_monday[sanitized_name].update({
+            'Vehicle_No': parsed_data.get('Vehicle_No', 'Unknown'),
+            'Vehicle_Type': parsed_data.get('Vehicle_Type', 'Unknown'),
+            'Make_Model': parsed_data.get('Make_Model', 'Unknown'),
+            'Year_of_Manufacture': parsed_data.get('Year_of_Manufacture', 'Unknown')
+        })
+
+        logger.info(f"Log card data for {sanitized_name} added to data_into_monday.")
+
+        # Check if all required documents are processed and send data to Monday
+        check_and_send_to_monday(sanitized_name)
+
         return parsed_data
 
     else:
         logger.error("Failed to extract text from the uploaded log card.")
         return None
+
+
 
 
 def parse_log_card_text(extracted_text):
@@ -612,7 +708,175 @@ def get_user_id_from_firestore(name):
         logger.error(f"Error retrieving user_id from Firestore: {e}")
         return None
     
-    
+
+
+
+# Monday board columns ID's
+FULL_NAME = "text9"
+AGENT_CONTACT_NUMBER = "phone0"
+DEALERSHIP_COLUMN_ID = "text3"
+CONTACT_INFO_COLUMN_ID = "phone"
+
+OWNER_ID = "text78"
+OWNER_ID_TYPE = "text"
+CONTACT_NUMBER = "phone"
+ORIGINAL_REGISTRATION_DATA = "date8"
+VEHICLE_MODEL = "text6"
+VEHICLE_MAKE = "text2"
+ENGINE_NUMBER = "engine_number"
+VEHICLE_NO = "text1"
+CHASSIS_NO = "text775"
+
+# Global dictionary to store sanitized data for Monday.com
+data_into_monday = {}
+
+
+MONDAY_API_TOKEN = os.getenv('MONDAY_API_TOKEN')
+POLICY_BOARD_ID = os.getenv('POLICY_BOARD_ID')
+
+
+def send_data_to_monday(sanitized_data):
+    """
+    Send the sanitized data to a Monday.com board using the provided column IDs.
+    Consolidates data from identity cards, driver's licenses, and log cards into one request.
+    """
+    if not POLICY_BOARD_ID:
+        logger.error("POLICY_BOARD_ID not set. Cannot send data to Monday.com.")
+        return False
+
+    if not MONDAY_API_TOKEN:
+        logger.error("MONDAY_API_TOKEN not set. Cannot authenticate to Monday.com.")
+        return False
+
+    # Define the Monday.com API endpoint
+    monday_api_url = "https://api.monday.com/v2"
+
+    # Prepare the headers for the request
+    headers = {
+        "Authorization": MONDAY_API_TOKEN,
+        "Content-Type": "application/json"
+    }
+
+    # Extract the sanitized name for the item name (if available)
+    item_name = sanitized_data.get('sanitized_name', 'Unnamed Policy Holder')
+
+    # Construct the column values in the format required by Monday.com
+    # Ensure proper escaping and handling of None values
+    column_values = {
+        FULL_NAME: sanitized_data.get("sanitized_name", "Unknown"),  # Full Name
+        AGENT_CONTACT_NUMBER: sanitized_data.get("Agent_Contact_Number", ""),  # Agent Contact Number
+        DEALERSHIP_COLUMN_ID: sanitized_data.get("Dealership", ""),  # Dealership
+        CONTACT_INFO_COLUMN_ID: sanitized_data.get("Contact_Info", ""),  # Contact Info
+        OWNER_ID: sanitized_data.get("Identity_Card_No", "Unknown"),  # Owner ID
+        OWNER_ID_TYPE: sanitized_data.get("Identity_Card_Type", "Unknown"),  # Owner ID Type (e.g., Identity card, driver's license)
+        CONTACT_NUMBER: sanitized_data.get("Contact_Number", ""),  # Contact Number
+        ORIGINAL_REGISTRATION_DATA: sanitized_data.get("Original_Registration_Date", ""),  # Original Registration Date (for vehicle documents)
+        VEHICLE_MODEL: sanitized_data.get("Make_Model", "Unknown"),  # Vehicle Model
+        VEHICLE_MAKE: sanitized_data.get("Vehicle_Type", "Unknown"),  # Vehicle Make
+        ENGINE_NUMBER: sanitized_data.get("Engine_No", "Unknown"),  # Engine Number
+        VEHICLE_NO: sanitized_data.get("Vehicle_No", "Unknown"),  # Vehicle No
+        CHASSIS_NO: sanitized_data.get("Chassis_No", "Unknown")  # Chassis No
+    }
+
+    # Filter out empty or None values from column_values
+    filtered_column_values = {k: v for k, v in column_values.items() if v}
+
+    # Serialize column_values to JSON string
+    column_values_json = json.dumps(filtered_column_values).replace('"', '\\"')  # Escape double quotes
+
+    # Construct the GraphQL mutation
+    query = f"""
+    mutation {{
+        create_item(board_id: {POLICY_BOARD_ID}, item_name: "{item_name}", column_values: "{column_values_json}") {{
+            id
+        }}
+    }}
+    """
+
+    # Send the request to Monday.com API
+    try:
+        response = requests.post(monday_api_url, json={'query': query}, headers=headers)
+
+        # Check the response status
+        if response.status_code == 200:
+            logger.info(f"Data successfully sent to Monday.com for {item_name}.")
+            return True
+        else:
+            logger.error(f"Failed to send data to Monday.com: {response.status_code} - {response.text}")
+            return False
+
+    except Exception as e:
+        logger.error(f"Error sending data to Monday.com: {e}")
+        return False
+
+
+
+
+
+def sanitize_and_store_data(user_data, identity_data=None, drivers_license_data=None, log_card_data=None):
+    """
+    Sanitize and store data from different document types (identity card, driver's license, log card).
+    """
+    sanitized_data = {}
+
+    if identity_data:
+        sanitized_data.update({
+            "sanitized_name": identity_data.get('sanitized_name', 'Unknown'),
+            "Identity_Card_No": identity_data.get('Identity_Card_No', 'Unknown'),
+            "Race": identity_data.get('Race', 'Unknown'),
+            "Date_of_birth": identity_data.get('Date_of_birth', 'Unknown'),
+            # Add more fields as needed
+        })
+
+    if drivers_license_data:
+        sanitized_data.update({
+            "License_Number": drivers_license_data.get('License_Number', 'Unknown'),
+            "Birth_Date": drivers_license_data.get('Birth_Date', 'Unknown'),
+            "Issue_Date": drivers_license_data.get('Issue_Date', 'Unknown'),
+            # Add more fields as needed
+        })
+
+    if log_card_data:
+        sanitized_data.update({
+            "Vehicle_No": log_card_data.get('Vehicle_No', 'Unknown'),
+            "Vehicle_Type": log_card_data.get('Vehicle_Type', 'Unknown'),
+            "Make_Model": log_card_data.get('Make_Model', 'Unknown'),
+            # Add more fields as needed
+        })
+
+    # Store sanitized data in the global dictionary
+    data_into_monday[user_data] = sanitized_data
+    logger.info(f"Sanitized data for user {user_data} stored in the global dictionary.")
+
+    # Step 4: Send the sanitized data to Monday.com board
+    result = send_data_to_monday(sanitized_data)
+
+    if result:
+        logger.info(f"Sanitized data for {user_data} successfully sent to Monday.com.")
+    else:
+        logger.error(f"Failed to send sanitized data for {user_data} to Monday.com.")
+
+    return sanitized_data
+
+
+def check_and_send_to_monday(sanitized_name):
+    """
+    Check if all documents (identity card, driver's license, log card) have been processed for the user.
+    If so, send the consolidated data to Monday.com.
+    """
+    user_data = data_into_monday.get(sanitized_name, {})
+
+    # Check if all required fields from all documents are available
+    if all(key in user_data for key in ['Identity_Card_No', 'License_Number', 'Vehicle_No']):
+        logger.info(f"All data ready for {sanitized_name}. Sending to Monday.com.")
+        
+        # Call the function to sanitize and send data to Monday
+        sanitize_and_store_data(sanitized_name, identity_data=user_data)
+
+        # Optionally clear the data for this user after sending
+        del data_into_monday[sanitized_name]
+    else:
+        logger.info(f"Waiting for more data for {sanitized_name}. Not all documents have been processed yet.")
 
 
 
