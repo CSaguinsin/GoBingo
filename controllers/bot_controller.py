@@ -52,6 +52,9 @@ async def handle_image(update: Update, context: CallbackContext) -> int:
             await update.message.reply_text("Please upload an image file (JPEG or PNG).")
             return UPLOADING
 
+        # Notify the user that the system is processing the uploaded image
+        await update.message.reply_text("Our system is currently processing your data, please wait and thank you!")
+
         # Download the file as bytes for further processing
         file_bytes = await file.download_as_bytearray()
         file_like_object = io.BytesIO(file_bytes)
@@ -126,7 +129,7 @@ async def handle_image(update: Update, context: CallbackContext) -> int:
 
                         send_to_monday_result = send_data_to_monday(complete_data)
                         if send_to_monday_result:
-                            await update.message.reply_text("All documents uploaded successfully and data sent to Monday.com. Thank you!")
+                            await update.message.reply_text("All documents uploaded successfully and stored at BingoLife Co. Thank you!")
                         else:
                             await update.message.reply_text("Error occurred while sending data to Monday.com.")
                     else:
